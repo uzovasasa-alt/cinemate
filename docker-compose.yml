@@ -1,0 +1,82 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cinemate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: cinemate
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinemate"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  migrate:
+    build: ./backend
+    command: ["python", "-m", "app.migrate"]
+    environment: &apienv
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql+asyncpg://cinemate:${POSTGRES_PASSWORD}@db:5432/cinemate
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      PUBLIC_URL: ${PUBLIC_URL}
+      TELEGRAM_BOT_USERNAME: ${TELEGRAM_BOT_USERNAME:-}
+      KINOPOISK_API_KEY: ${KINOPOISK_API_KEY:-}
+      KINOPOISK_MAX_RPS: ${KINOPOISK_MAX_RPS:-5}
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment: *apienv
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_started}
+
+  bot:
+    build: ./bot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:?}
+      API_INTERNAL_URL: http://api:8000
+      BOT_MODE: webhook
+      TELEGRAM_WEBHOOK_URL: ${PUBLIC_URL}/telegram/webhook
+      TELEGRAM_WEBHOOK_SECRET: ${TELEGRAM_WEBHOOK_SECRET:?}
+      PUBLIC_URL: ${PUBLIC_URL}
+    depends_on: [api]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN:?}
+    volumes:
+      - ./deploy/nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - certs:/etc/letsencrypt
+      - acme:/var/www/certbot
+    depends_on: [api, bot]
+
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certs:/etc/letsencrypt
+      - acme:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+
+volumes:
+  pgdata:
+  certs:
+  acme:
